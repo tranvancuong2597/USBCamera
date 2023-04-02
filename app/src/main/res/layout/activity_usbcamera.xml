@@ -29,6 +29,13 @@
             android:layout_gravity="center"/>
     </FrameLayout>
 
+    <com.jiangdg.usbcamera.view.OverlayView
+        android:id="@+id/tracking_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_below="@id/toolbar">
+    </com.jiangdg.usbcamera.view.OverlayView>
+
     <LinearLayout
         android:id="@+id/llayout_contrast"
         android:layout_width="match_parent"

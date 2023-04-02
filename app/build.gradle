@@ -38,7 +38,10 @@ dependencies {
     //implementation 'com.google.android.material:material:1.6.1'
     implementation 'com.google.android.material:material:1.5.0-alpha02'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'org.tensorflow:tensorflow-lite-support:0.1.0'
+    implementation 'org.tensorflow:tensorflow-lite-metadata:0.1.0'
     implementation 'org.tensorflow:tensorflow-lite-gpu:2.3.0'
+//    implementation 'org.tensorflow:tensorflow-lite-gpu:2.3.0'
     annotationProcessor 'com.jakewharton:butterknife-compiler:10.2.0'
     // For developers using AndroidX in their applications
     implementation 'pub.devrel:easypermissions:3.0.0'

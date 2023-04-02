@@ -5,14 +5,18 @@ import androidx.appcompat.app.AppCompatActivity;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.AssetFileDescriptor;
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.RectF;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.provider.MediaStore;
@@ -25,21 +29,35 @@ import com.jiangdg.usbcamera.R;
 import com.jiangdg.usbcamera.tflite.Classifier;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.pytorch.IValue;
 import org.pytorch.LiteModuleLoader;
+import org.pytorch.MemoryFormat;
 import org.pytorch.Module;
 import org.pytorch.Tensor;
 import org.pytorch.torchvision.TensorImageUtils;
+import org.tensorflow.lite.Interpreter;
+import org.tensorflow.lite.gpu.GpuDelegate;
+import org.tensorflow.lite.nnapi.NnApiDelegate;
 
 public class DetectionActivity extends AppCompatActivity implements Runnable{
 
@@ -57,12 +75,16 @@ public class DetectionActivity extends AppCompatActivity implements Runnable{
 
     private long lastProcessingTimeMs;
     private long timestamp = 0;
-    private static Classifier classifier;
 
-    private Module mModule = null;
+    AssetManager assetManager = null;
 
-    static float[] NO_MEAN_RGB = new float[] {0.0f, 0.0f, 0.0f};
-    static float[] NO_STD_RGB = new float[] {1.0f, 1.0f, 1.0f};
+    private static final int NUM_THREADS = 4;
+    private static boolean isNNAPI = false;
+    private static boolean isGPU = false;
+    private Interpreter tfLite;
+    protected static final int BATCH_SIZE = 1;
+    protected static final int PIXEL_SIZE = 3;
+    private static final int INPUT_SIZE = 224;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -73,11 +95,7 @@ public class DetectionActivity extends AppCompatActivity implements Runnable{
         btnDetect = findViewById(R.id.detectButton);
         btnSelectFromGallery = findViewById(R.id.select_from_gallery);
 
-        try {
-            initClassifier();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+        assetManager = getApplicationContext().getAssets();
 
         btnSelectFromGallery.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -86,50 +104,45 @@ public class DetectionActivity extends AppCompatActivity implements Runnable{
             }
         });
 
-        try {
-            mModule = LiteModuleLoader.load(DetectionActivity.assetFilePath(getApplicationContext(), "resnet50_ver5.ptl"));
-        } catch (IOException e) {
-            Log.e("Object Detection", "Error reading assets", e);
-            finish();
-        }
+        initTFLite("resnet50-224.tflite");
 
         btnDetect.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                Log.d("Cuongcuong", "Vaoday");
 
                 runInBackground(new Runnable() {
                     @Override
                     public void run() {
                         Integer cntAbnormal = 0;
+                        Integer cntNormal = 0;
                         try {
                             List<String> list_img = getImage(getBaseContext());
-                            for (int i=0 ; i<list_img.size() ; i++) {
+                            for (int k=0 ; k<list_img.size() ; k++) {
 //                                InputStream inputStream = getAssets().open("abnormal/" + list_img.get(i));
-                                Log.d("Cuongcuong", list_img.get(i));
+                                Log.d("Cuongcuong", list_img.get(k));
+//                                Bitmap bitmap = BitmapFactory.decodeStream(getAssets().open("abnormal/" + "aom (8).png"));
+                                Bitmap bitmap = BitmapFactory.decodeStream(getAssets().open("normal/" + list_img.get(k)));
+                                Bitmap resizedBitmap = Bitmap.createScaledBitmap(bitmap, 235, 235, false);
+                                cropBitmap = scaleCenterCrop(resizedBitmap, INPUT_SIZE, INPUT_SIZE);
+                                float[][][] img = normalizeImage(cropBitmap);
+                                float[][][][] input_net = new float[1][][][];
+                                input_net[0] = img;
+                                input_net = transposeBatch(input_net);
 
-                                Bitmap bitmap = BitmapFactory.decodeStream(getAssets().open(list_img.get(i)));
-
-                                cropBitmap = processBitmap(bitmap, 235);
-                                cropBitmap = scaleCenterCrop(cropBitmap, 224, 224);
-//                                final Tensor inputTensor = TensorImageUtils.bitmapToFloat32Tensor(cropBitmap, NO_MEAN_RGB, NO_STD_RGB);
-//                                IValue[] outputTuple = mModule.forward(IValue.from(inputTensor)).toTuple();
-//                                final Tensor outputTensor = outputTuple[0].toTensor();
-//                                final float[] outputs = outputTensor.getDataAsFloatArray();
-//                                Log.d("Cuongcuong: ", "output" + outputs);
-
-//
-//                                final float[][] results = classifier.recognizeImage_new(cropBitmap, "a");
-//                                Log.d("Cuongcuong", "len results: " + results.length);
-//                                Log.d("Cuongcuong", "results: " + results[0][0] + " " + results[0][1]);
-
-//                                final ArrayList<Classifier.Recognition> detections = classifier.recognizeImage3(bitmap);
-
-//                                if (results[0][0] > results[0][1]) {
-//                                    cntAbnormal += 1;
-//                                }
-
+                                Map<Integer, Object> outputMap = new HashMap<>();
+                                outputMap.put(0, new float[1][2]);
+                                tfLite.runForMultipleInputsOutputs(new Object[]{input_net}, outputMap);
+                                float[][] outputs = (float[][]) outputMap.get(0);
+                                Log.d("Cuongcuong", outputs[0][0] + " " + outputs[0][1]);
+                                if (outputs[0][0] > outputs[0][1]) {
+                                    cntAbnormal += 1;
+                                    Log.d("Cuongcuong", "abnormal");
+                                } else {
+                                    cntNormal += 1;
+                                    Log.d("Cuongcuong", "normal");
+                                }
                             }
+                            Log.d("Cuongcuong: ", "cntNormal: " + cntNormal + " Ratio: " + cntNormal / list_img.size());
                             Log.d("Cuongcuong: ", "cntAbnormal: " + cntAbnormal + " Ratio: " + cntAbnormal / list_img.size());
                         } catch (IOException e) {
                             e.printStackTrace();
@@ -138,7 +151,6 @@ public class DetectionActivity extends AppCompatActivity implements Runnable{
 
                     }
                 });
-
             }
         });
     }
@@ -151,24 +163,9 @@ public class DetectionActivity extends AppCompatActivity implements Runnable{
     private List<String> getImage(Context context) throws IOException
     {
         AssetManager assetManager = context.getAssets();
-        String[] files = assetManager.list("abnormal");
+        String[] files = assetManager.list("normal");
         List<String> it= Arrays.asList(files);
         return it;
-    }
-
-    public static Bitmap getBitmapFromAsset(Context context, String filePath) {
-        AssetManager assetManager = context.getAssets();
-
-        InputStream istr;
-        Bitmap bitmap = null;
-        try {
-            istr = assetManager.open(filePath);
-            bitmap = BitmapFactory.decodeStream(istr);
-        } catch (IOException e) {
-            // handle exception
-        }
-
-        return bitmap;
     }
 
     private void openGallery() {
@@ -182,20 +179,14 @@ public class DetectionActivity extends AppCompatActivity implements Runnable{
         if (resultCode == RESULT_OK && requestCode == PICK_IMAGE){
             imageUri = data.getData();
             //imageView.setImageURI(imageUri);
-
             try {
                 Bitmap bitmap = MediaStore.Images.Media.getBitmap(this.getContentResolver(), imageUri);
-
                 this.sourceBitmap = bitmap;
-
                 this.cropBitmap = processBitmap(sourceBitmap, 248);
-
                 this.imageView.setImageBitmap(sourceBitmap);
             } catch (IOException e) {
                 e.printStackTrace();
             }
-
-
         }
     }
 
@@ -316,17 +307,12 @@ public class DetectionActivity extends AppCompatActivity implements Runnable{
         }
     }
 
-    private void initClassifier() throws IOException {
-        classifier = new Classifier(getAssets(), "resnet50-224.tflite","labels.txt",32, getBaseContext());
-        classifier.init();
-    }
 
     public static String assetFilePath(Context context, String assetName) throws IOException {
         File file = new File(context.getFilesDir(), assetName);
         if (file.exists() && file.length() > 0) {
             return file.getAbsolutePath();
         }
-
         try (InputStream is = context.getAssets().open(assetName)) {
             try (OutputStream os = new FileOutputStream(file)) {
                 byte[] buffer = new byte[4 * 1024];
@@ -340,6 +326,102 @@ public class DetectionActivity extends AppCompatActivity implements Runnable{
         }
     }
 
+    public void writeFileOnInternalStorage(Context mcoContext,String sFileName, String sBody){
+        File file = new File(mcoContext.getFilesDir(),"mydir");
+        String ff = mcoContext.getFilesDir().toString();
+        if(!file.exists()){
+            file.mkdir();
+        }
+        try{
+            File gpxfile = new File(file, sFileName);
+            BufferedWriter buf = new BufferedWriter(new FileWriter(gpxfile, true));
+            buf.append(sBody);
+            buf.newLine();
+            buf.close();
+        }catch (Exception e){
+        }
+    }
 
+    // tfLite
+
+    public static MappedByteBuffer loadModelFile(AssetManager assets, String modelFilename)
+            throws IOException {
+        AssetFileDescriptor fileDescriptor = assets.openFd(modelFilename);
+        FileInputStream inputStream = new FileInputStream(fileDescriptor.getFileDescriptor());
+        FileChannel fileChannel = inputStream.getChannel();
+        long startOffset = fileDescriptor.getStartOffset();
+        long declaredLength = fileDescriptor.getDeclaredLength();
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
+    }
+
+    public void initTFLite(String modelFilename) {
+        try {
+            Interpreter.Options options = (new Interpreter.Options());
+            options.setNumThreads(NUM_THREADS);
+            if (isNNAPI) {
+                NnApiDelegate nnApiDelegate = null;
+                // Initialize interpreter with NNAPI delegate for Android Pie or above
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    nnApiDelegate = new NnApiDelegate();
+                    options.addDelegate(nnApiDelegate);
+                    options.setNumThreads(NUM_THREADS);
+                    options.setUseNNAPI(false);
+                    options.setAllowFp16PrecisionForFp32(true);
+                    options.setAllowBufferHandleOutput(true);
+                    options.setUseNNAPI(true);
+                }
+            }
+            if (isGPU) {
+                GpuDelegate gpuDelegate = new GpuDelegate();
+                options.addDelegate(gpuDelegate);
+            }
+            tfLite = new Interpreter(loadModelFile(assetManager, modelFilename), options);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+
+    public static float[][][] normalizeImage(Bitmap bitmap) {
+        int h = bitmap.getHeight();
+        int w = bitmap.getWidth();
+        float[][][] floatValues = new float[h][w][3];
+
+        float imageMean = 128;
+        float imageStd = 128;
+
+        int[] pixels = new int[h * w];
+        bitmap.getPixels(pixels, 0, bitmap.getWidth(), 0, 0, w, h);
+        for (int i = 0; i < h; i++) {
+            for (int j = 0; j < w; j++) {
+                final int val = pixels[i * w + j];
+                float r = (((val >> 16) & 0xFF) - imageMean) / imageStd;
+                float g = (((val >> 8) & 0xFF) - imageMean) / imageStd;
+                float b = ((val & 0xFF) - imageMean) / imageStd;
+                float[] arr = {r, g, b};
+                floatValues[i][j] = arr;
+            }
+        }
+        return floatValues;
+    }
+
+    public static float[][][][] transposeBatch(float[][][][] in) {
+        // in b, h, w, c
+        int batch = in.length;
+        int h = in[0].length;
+        int w = in[0][0].length;
+        int channel = in[0][0][0].length;
+        float[][][][] out = new float[batch][channel][w][h];
+        for (int i = 0; i < batch; i++) {
+            for (int j=0; j < channel ; j++) {
+                for (int m = 0; m < h; m++) {
+                    for (int n = 0; n < w; n++) {
+                        out[i][j][n][m] = in[i][n][m][j] ;
+                    }
+                }
+            }
+        }
+        return out;
+    }
 
 }

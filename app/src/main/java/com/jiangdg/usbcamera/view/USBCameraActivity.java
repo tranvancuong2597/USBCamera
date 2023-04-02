@@ -3,9 +3,15 @@ package com.jiangdg.usbcamera.view;
 import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.AssetFileDescriptor;
+import android.content.res.AssetManager;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.hardware.usb.UsbDevice;
 import android.os.Build;
 import android.os.Bundle;
@@ -47,9 +53,18 @@ import com.serenegiant.usb.common.AbstractUVCCameraHandler;
 import com.serenegiant.usb.encoder.RecordParams;
 import com.serenegiant.usb.widget.CameraViewInterface;
 
+import org.tensorflow.lite.Interpreter;
+import org.tensorflow.lite.gpu.GpuDelegate;
+import org.tensorflow.lite.nnapi.NnApiDelegate;
+
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import butterknife.BindView;
 import butterknife.ButterKnife;
@@ -83,15 +98,19 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
     private boolean isRequest;
     private boolean isPreview;
 
+    private static final int NUM_THREADS = 4;
+    private static boolean isNNAPI = false;
+    private static boolean isGPU = false;
+
     private static Classifier classifier;
     private Runnable imageConverter;
     protected int previewWidth = 0;
     protected int previewHeight = 0;
     private int[] rgbBytes = null;
-    private Bitmap rgbFrameBitmap = null;
     private Bitmap croppedBitmap = null;
 
     private static final int cropSize = 224;
+    private static final int cropSize_rescale = 235;
     private Matrix frameToCropTransform;
     private Matrix cropToFrameTransform;
 
@@ -104,31 +123,14 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
     private Handler handler;
     private HandlerThread handlerThread;
 
-    public boolean isWriteStoragePermissionGranted() {
-        if (Build.VERSION.SDK_INT >= 23) {
-            if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
-                return true;
-            } else {
-                ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, READ_PERMISSION);
-                return false;
-            }
-        } else {
-            return true;
-        }
-    }
+    private Interpreter tfLite;
+    AssetManager assetManager = null;
+    private boolean isProcessingFrame = false;
+    private Bitmap rgbFrameBitmap = null;
+    OverlayView trackingOverlay;
+    private boolean computingDetection = false;
+    private Runnable postInferenceCallback;
 
-    public boolean isReadStoragePermissionGranted() {
-        if (Build.VERSION.SDK_INT >= 23) {
-            if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
-                return true;
-            } else {
-                ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, READ_PERMISSION);
-                return false;
-            }
-        } else {
-            return true;
-        }
-    }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
@@ -205,20 +207,17 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
         ButterKnife.bind(this);
         initView();
 
+        //trackingOverlay = findViewById(R.id.ov)
+
+        assetManager = getApplicationContext().getAssets();
+        initTFLite("resnet50-224.tflite");
+
         // step.1 initialize UVCCameraHelper
         mUVCCameraView = (CameraViewInterface) mTextureView;
         mUVCCameraView.setCallback(this);
         mCameraHelper = UVCCameraHelper.getInstance();
         mCameraHelper.setDefaultFrameFormat(UVCCameraHelper.FRAME_FORMAT_MJPEG);
         mCameraHelper.initUSBMonitor(this, mUVCCameraView, listener);
-
-
-
-        try {
-            initClassifier();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
 
         sensorOrientation = rotation - getScreenOrientation();
         previewHeight = mCameraHelper.getPreviewHeight();
@@ -236,27 +235,36 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
         cropToFrameTransform = new Matrix();
         frameToCropTransform.invert(cropToFrameTransform);
 
+
+
         mCameraHelper.setOnPreviewFrameListener(new AbstractUVCCameraHandler.OnPreViewResultListener() {
             @Override
-            public void onPreviewResult(byte[] nv21Yuv) {
-                Log.d(TAG, "onPreviewResult: "+nv21Yuv.length);
+            public void onPreviewResult(byte[] bytes) {
+                Log.d(TAG, "onPreviewResult: "+bytes.length);
 
                 previewHeight = mCameraHelper.getPreviewHeight();
                 previewWidth = mCameraHelper.getPreviewWidth();
 
                 rgbBytes = new int[previewWidth * previewHeight];
+                isProcessingFrame = true;
 
                 imageConverter =
                         new Runnable() {
                             @Override
                             public void run() {
-                                ImageUtils.convertYUV420SPToARGB8888(nv21Yuv, previewWidth, previewHeight, rgbBytes);
+                                ImageUtils.convertYUV420SPToARGB8888(bytes, previewWidth, previewHeight, rgbBytes);
+                            }
+                        };
+
+                postInferenceCallback =
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                isProcessingFrame = false;
                             }
                         };
 
                 processImage();
-
-                Log.d("cuongcuong", "Hihi");
             }
         });
     }
@@ -264,23 +272,46 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
     private void processImage() {
         ++timestamp;
         final long currTimestamp = timestamp;
+        if (computingDetection) {
+            readyForNextImage();
+            return;
+        }
+        computingDetection = true;
+
         rgbFrameBitmap.setPixels(getRgbBytes(), 0, previewWidth, 0, 0, previewWidth, previewHeight);
 
-        final Canvas canvas = new Canvas(croppedBitmap);
+        readyForNextImage();
+
+        final Canvas canvas = new Canvas(rgbFrameBitmap);
         canvas.drawBitmap(rgbFrameBitmap, frameToCropTransform, null);
 
         runInBackground(new Runnable() {
             @Override
             public void run() {
-                Log.d("Cuongcuong", "Time start run inference: " + currTimestamp);
-                final long startTime = SystemClock.uptimeMillis();
-                final List<Classifier.Recognition> results = classifier.recognizeImage(croppedBitmap, "a");
+                Bitmap resizedBitmap = Bitmap.createScaledBitmap(rgbFrameBitmap, 235, 235, false);
+                Bitmap mCropBitmap = scaleCenterCrop(resizedBitmap, cropSize, cropSize);
+                float[][][] img = normalizeImage(mCropBitmap);
+                float[][][][] input_net = new float[1][][][];
+                input_net[0] = img;
+                input_net = transposeBatch(input_net);
 
-                lastProcessingTimeMs = SystemClock.uptimeMillis() - startTime;
+                Map<Integer, Object> outputMap = new HashMap<>();
+                outputMap.put(0, new float[1][2]);
+                tfLite.runForMultipleInputsOutputs(new Object[]{input_net}, outputMap);
+                float[][] outputs = (float[][]) outputMap.get(0);
+                Log.d("Cuongcuong", outputs[0][0] + " " + outputs[0][1]);
+                if (outputs[0][0] > outputs[0][1]) {
+                    Log.d("Cuongcuong", "abnormal");
+                } else {
+                    Log.d("Cuongcuong", "normal");
+                }
 
-                Log.d("Cuongcuong", "run: " + results.size());
+                final Paint paint = new Paint();
+                paint.setColor(Color.RED);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(2.0f);
 
-
+                computingDetection = false;
             }
         });
     }
@@ -567,11 +598,6 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
         }
     }
 
-    private void initClassifier() throws IOException {
-        classifier = new Classifier(getAssets(), "levit224.tflite","labels.txt",32, getBaseContext());
-        classifier.init();
-    }
-
     protected int getScreenOrientation() {
         switch (getWindowManager().getDefaultDisplay().getRotation()) {
             case Surface.ROTATION_270:
@@ -594,5 +620,164 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
         if (handler != null) {
             handler.post(r);
         }
+    }
+
+    protected void readyForNextImage() {
+        if (postInferenceCallback != null) {
+            postInferenceCallback.run();
+        }
+    }
+
+    public static Bitmap scaleCenterCrop(Bitmap source, int newHeight, int newWidth) {
+        int sourceWidth = source.getWidth();
+        int sourceHeight = source.getHeight();
+
+        float xScale = (float) newWidth / sourceWidth;
+        float yScale = (float) newHeight / sourceHeight;
+        float scale = Math.max(xScale, yScale);
+
+        // Now get the size of the source bitmap when scaled
+        float scaledWidth = scale * sourceWidth;
+        float scaledHeight = scale * sourceHeight;
+
+        float left = (newWidth - scaledWidth) / 2;
+        float top = (newHeight - scaledHeight) / 2;
+
+        RectF targetRect = new RectF(left, top, left + scaledWidth, top
+                + scaledHeight);//from ww w  .j a va 2s. co m
+
+        Bitmap dest = Bitmap.createBitmap(newWidth, newHeight,
+                source.getConfig());
+        Canvas canvas = new Canvas(dest);
+        canvas.drawBitmap(source, null, targetRect, null);
+
+        return dest;
+    }
+
+    public static Matrix getTransformationMatrix(
+            final int srcWidth,
+            final int srcHeight,
+            final int dstWidth,
+            final int dstHeight,
+            final int applyRotation,
+            final boolean maintainAspectRatio) {
+        final Matrix matrix = new Matrix();
+
+        if (applyRotation != 0) {
+            // Translate so center of image is at origin.
+            matrix.postTranslate(-srcWidth / 2.0f, -srcHeight / 2.0f);
+
+            // Rotate around origin.
+            matrix.postRotate(applyRotation);
+        }
+
+        // Account for the already applied rotation, if any, and then determine how
+        // much scaling is needed for each axis.
+        final boolean transpose = (Math.abs(applyRotation) + 90) % 180 == 0;
+
+        final int inWidth = transpose ? srcHeight : srcWidth;
+        final int inHeight = transpose ? srcWidth : srcHeight;
+
+        // Apply scaling if necessary.
+        if (inWidth != dstWidth || inHeight != dstHeight) {
+            final float scaleFactorX = dstWidth / (float) inWidth;
+            final float scaleFactorY = dstHeight / (float) inHeight;
+
+            if (maintainAspectRatio) {
+                // Scale by minimum factor so that dst is filled completely while
+                // maintaining the aspect ratio. Some image may fall off the edge.
+                final float scaleFactor = Math.max(scaleFactorX, scaleFactorY);
+                matrix.postScale(scaleFactor, scaleFactor);
+            } else {
+                // Scale exactly to fill dst from src.
+                matrix.postScale(scaleFactorX, scaleFactorY);
+            }
+        }
+
+        if (applyRotation != 0) {
+            // Translate back from origin centered reference to destination frame.
+            matrix.postTranslate(dstWidth / 2.0f, dstHeight / 2.0f);
+        }
+
+        return matrix;
+    }
+
+    public static MappedByteBuffer loadModelFile(AssetManager assets, String modelFilename)
+            throws IOException {
+        AssetFileDescriptor fileDescriptor = assets.openFd(modelFilename);
+        FileInputStream inputStream = new FileInputStream(fileDescriptor.getFileDescriptor());
+        FileChannel fileChannel = inputStream.getChannel();
+        long startOffset = fileDescriptor.getStartOffset();
+        long declaredLength = fileDescriptor.getDeclaredLength();
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
+    }
+
+    public void initTFLite(String modelFilename) {
+        try {
+            Interpreter.Options options = (new Interpreter.Options());
+            options.setNumThreads(NUM_THREADS);
+            if (isNNAPI) {
+                NnApiDelegate nnApiDelegate = null;
+                // Initialize interpreter with NNAPI delegate for Android Pie or above
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    nnApiDelegate = new NnApiDelegate();
+                    options.addDelegate(nnApiDelegate);
+                    options.setNumThreads(NUM_THREADS);
+                    options.setUseNNAPI(false);
+                    options.setAllowFp16PrecisionForFp32(true);
+                    options.setAllowBufferHandleOutput(true);
+                    options.setUseNNAPI(true);
+                }
+            }
+            if (isGPU) {
+                GpuDelegate gpuDelegate = new GpuDelegate();
+                options.addDelegate(gpuDelegate);
+            }
+            tfLite = new Interpreter(loadModelFile(assetManager, modelFilename), options);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static float[][][] normalizeImage(Bitmap bitmap) {
+        int h = bitmap.getHeight();
+        int w = bitmap.getWidth();
+        float[][][] floatValues = new float[h][w][3];
+
+        float imageMean = 128;
+        float imageStd = 128;
+
+        int[] pixels = new int[h * w];
+        bitmap.getPixels(pixels, 0, bitmap.getWidth(), 0, 0, w, h);
+        for (int i = 0; i < h; i++) {
+            for (int j = 0; j < w; j++) {
+                final int val = pixels[i * w + j];
+                float r = (((val >> 16) & 0xFF) - imageMean) / imageStd;
+                float g = (((val >> 8) & 0xFF) - imageMean) / imageStd;
+                float b = ((val & 0xFF) - imageMean) / imageStd;
+                float[] arr = {r, g, b};
+                floatValues[i][j] = arr;
+            }
+        }
+        return floatValues;
+    }
+
+    public static float[][][][] transposeBatch(float[][][][] in) {
+        // in b, h, w, c
+        int batch = in.length;
+        int h = in[0].length;
+        int w = in[0][0].length;
+        int channel = in[0][0][0].length;
+        float[][][][] out = new float[batch][channel][w][h];
+        for (int i = 0; i < batch; i++) {
+            for (int j=0; j < channel ; j++) {
+                for (int m = 0; m < h; m++) {
+                    for (int n = 0; n < w; n++) {
+                        out[i][j][n][m] = in[i][n][m][j] ;
+                    }
+                }
+            }
+        }
+        return out;
     }
 }

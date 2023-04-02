@@ -13,8 +13,9 @@ buildscript {
 allprojects {
     repositories {
         google()
+        mavenCentral()
         //maven { url 'http://raw.github.com/saki4510t/libcommon/master/repository/' }
-        maven { url 'http://maven.aliyun.com/nexus/content/groups/public/' }
+        //maven { url 'http://maven.aliyun.com/nexus/content/groups/public/' }
         jcenter()
 
         flatDir {

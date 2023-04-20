@@ -12,6 +12,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
+import android.graphics.Paint;
 import android.graphics.RectF;
 import android.net.Uri;
 import android.os.Build;
@@ -27,6 +28,7 @@ import android.widget.ImageView;
 
 import com.jiangdg.usbcamera.R;
 import com.jiangdg.usbcamera.tflite.Classifier;
+import com.jiangdg.usbcamera.tracking.Recognition;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -59,6 +61,8 @@ import org.tensorflow.lite.Interpreter;
 import org.tensorflow.lite.gpu.GpuDelegate;
 import org.tensorflow.lite.nnapi.NnApiDelegate;
 
+import butterknife.internal.Utils;
+
 public class DetectionActivity extends AppCompatActivity implements Runnable{
 
     ImageView imageView;
@@ -85,6 +89,10 @@ public class DetectionActivity extends AppCompatActivity implements Runnable{
     protected static final int BATCH_SIZE = 1;
     protected static final int PIXEL_SIZE = 3;
     private static final int INPUT_SIZE = 224;
+
+    public static final int previewSize = 416;
+    private Bitmap previewBitmap;
+    private static final float minimumConfidence = 0.5f;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -122,6 +130,16 @@ public class DetectionActivity extends AppCompatActivity implements Runnable{
                                 Log.d("Cuongcuong", list_img.get(k));
 //                                Bitmap bitmap = BitmapFactory.decodeStream(getAssets().open("abnormal/" + "aom (8).png"));
                                 Bitmap bitmap = BitmapFactory.decodeStream(getAssets().open("normal/" + list_img.get(k)));
+
+                                runOnUiThread(
+                                        new Runnable() {
+                                            @Override
+                                            public void run() {
+                                                previewBitmap = processBitmap(bitmap, previewSize);
+                                                imageView.setImageBitmap(previewBitmap);
+                                            }
+                                        });
+
                                 Bitmap resizedBitmap = Bitmap.createScaledBitmap(bitmap, 235, 235, false);
                                 cropBitmap = scaleCenterCrop(resizedBitmap, INPUT_SIZE, INPUT_SIZE);
                                 float[][][] img = normalizeImage(cropBitmap);
@@ -134,17 +152,55 @@ public class DetectionActivity extends AppCompatActivity implements Runnable{
                                 tfLite.runForMultipleInputsOutputs(new Object[]{input_net}, outputMap);
                                 float[][] outputs = (float[][]) outputMap.get(0);
                                 Log.d("Cuongcuong", outputs[0][0] + " " + outputs[0][1]);
+
+                                Recognition mobject;
+                                final List<Recognition> results = new ArrayList<>();
+                                RectF rectf = new RectF(50, 50, previewSize - 50, previewSize - 50);
+
+                                final Canvas canvas = new Canvas(previewBitmap);
+                                final Paint paint = new Paint();
+                                paint.setStyle(Paint.Style.STROKE);
+                                paint.setStrokeWidth(2.0f);
+
                                 if (outputs[0][0] > outputs[0][1]) {
                                     cntAbnormal += 1;
                                     Log.d("Cuongcuong", "abnormal");
+                                    mobject = new Recognition("0", "abnormal", 1F, rectf);
+                                    paint.setColor(Color.RED);
                                 } else {
                                     cntNormal += 1;
                                     Log.d("Cuongcuong", "normal");
+                                    mobject = new Recognition("1", "normal", 1F, rectf);
+                                    paint.setColor(Color.GREEN);
                                 }
+                                results.add(mobject);
+
+                                for (final Recognition result : results) {
+                                    final RectF location = result.getLocation();
+                                    if (location != null && result.getConfidence() >= minimumConfidence) {
+                                        Log.d("Cuongcuong", location + "");
+                                        canvas.drawRect(location, paint);
+                                        canvas.drawText(result.getTitle(), 20, 20, paint);
+                                        result.setLocation(location);
+                                    }
+                                }
+
+                                runOnUiThread(
+                                        new Runnable() {
+                                            @Override
+                                            public void run() {
+                                                imageView.setImageBitmap(previewBitmap);
+                                            }
+                                        });
+
+                                Thread.sleep(2000);
+
                             }
                             Log.d("Cuongcuong: ", "cntNormal: " + cntNormal + " Ratio: " + cntNormal / list_img.size());
                             Log.d("Cuongcuong: ", "cntAbnormal: " + cntAbnormal + " Ratio: " + cntAbnormal / list_img.size());
                         } catch (IOException e) {
+                            e.printStackTrace();
+                        } catch (InterruptedException e) {
                             e.printStackTrace();
                         }
 

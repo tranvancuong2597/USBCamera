@@ -44,6 +44,8 @@ import androidx.core.content.ContextCompat;
 import com.jiangdg.usbcamera.UVCCameraHelper;
 import com.jiangdg.usbcamera.application.MyApplication;
 import com.jiangdg.usbcamera.tflite.Classifier;
+import com.jiangdg.usbcamera.tracking.MultiBoxTracker;
+import com.jiangdg.usbcamera.tracking.Recognition;
 import com.jiangdg.usbcamera.utils.FileUtils;
 import com.jiangdg.usbcamera.utils.ImageUtils;
 import com.serenegiant.usb.CameraDialog;
@@ -68,12 +70,6 @@ import java.util.Map;
 
 import butterknife.BindView;
 import butterknife.ButterKnife;
-
-/**
- * UVCCamera use demo
- * <p>
- * Created by jiangdongguo on 2017/9/30.
- */
 
 public class USBCameraActivity extends AppCompatActivity implements CameraDialog.CameraDialogParent, CameraViewInterface.Callback {
     private static final String TAG = "Debug";
@@ -130,17 +126,10 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
     OverlayView trackingOverlay;
     private boolean computingDetection = false;
     private Runnable postInferenceCallback;
+    private MultiBoxTracker tracker;
+    private boolean debug = false;
+    private static final float minimumConfidence = 0.5f;
 
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == WRITE_PERMISSION && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            //write();
-        } else if (requestCode == READ_PERMISSION && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            //read();
-        }
-    }
 
     private UVCCameraHelper.OnMyDevConnectListener listener = new UVCCameraHelper.OnMyDevConnectListener() {
 
@@ -235,7 +224,20 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
         cropToFrameTransform = new Matrix();
         frameToCropTransform.invert(cropToFrameTransform);
 
+        tracker = new MultiBoxTracker(this);
+        trackingOverlay = (OverlayView) findViewById(R.id.tracking_overlay);
 
+        trackingOverlay.addCallback(new OverlayView.DrawCallback() {
+            @Override
+            public void drawCallback(Canvas canvas) {
+                tracker.draw(canvas);
+                if (isDebug()) {
+                    tracker.drawDebug(canvas);
+                }
+            }
+        });
+
+        tracker.setFrameConfiguration(previewWidth, previewHeight, sensorOrientation);
 
         mCameraHelper.setOnPreviewFrameListener(new AbstractUVCCameraHandler.OnPreViewResultListener() {
             @Override
@@ -300,16 +302,38 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
                 tfLite.runForMultipleInputsOutputs(new Object[]{input_net}, outputMap);
                 float[][] outputs = (float[][]) outputMap.get(0);
                 Log.d("Cuongcuong", outputs[0][0] + " " + outputs[0][1]);
-                if (outputs[0][0] > outputs[0][1]) {
-                    Log.d("Cuongcuong", "abnormal");
-                } else {
-                    Log.d("Cuongcuong", "normal");
-                }
-
+                Recognition mobject;
+                final List<Recognition> results = new ArrayList<>();
+                RectF rectf = new RectF(5, 100, 200, 200);
                 final Paint paint = new Paint();
-                paint.setColor(Color.RED);
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(2.0f);
+                paint.setTextSize(50);
+
+                if (outputs[0][0] > outputs[0][1]) {
+                    Log.d("Cuongcuong", "abnormal");
+                    mobject = new Recognition("0", "abnormal", 1F, rectf);
+                    paint.setColor(Color.RED);
+                } else {
+                    Log.d("Cuongcuong", "normal");
+                    mobject = new Recognition("1", "normal", 1F, rectf);
+                    paint.setColor(Color.GREEN);
+                }
+                results.add(mobject);
+
+                for (final Recognition result : results) {
+                    final RectF location = result.getLocation();
+                    if (location != null && result.getConfidence() >= minimumConfidence) {
+                        Log.d("Cuongcuong", "previewWidth: " + previewWidth + " previewHeight: " + previewHeight);
+                        Log.d("Cuongcuong", location + "");
+                        canvas.drawRect(location, paint);
+                        cropToFrameTransform.mapRect(location);
+                        result.setLocation(location);
+                    }
+                }
+
+                tracker.trackResults(results, currTimestamp);
+                trackingOverlay.postInvalidate();
 
                 computingDetection = false;
             }
@@ -369,6 +393,15 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
     }
 
     @Override
+    protected void onStop() {
+        super.onStop();
+        // step.3 unregister USB event broadcast
+        if (mCameraHelper != null) {
+            mCameraHelper.unregisterUSB();
+        }
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         handlerThread = new HandlerThread("inference");
@@ -389,13 +422,8 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
         }
     }
 
-    @Override
-    protected void onStop() {
-        super.onStop();
-        // step.3 unregister USB event broadcast
-        if (mCameraHelper != null) {
-            mCameraHelper.unregisterUSB();
-        }
+    public boolean isDebug() {
+        return debug;
     }
 
     @Override

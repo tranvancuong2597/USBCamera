@@ -18,13 +18,12 @@ android {
     }
     // solving com.android.tools.r8.CompilationFailedException: Compilation failed to complete
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility rootProject.ext.javaSourceCompatibility
+        targetCompatibility rootProject.ext.javaTargetCompatibility
     }
-    buildFeatures {
-        mlModelBinding false
+    aaptOptions {
+        noCompress "tflite"
     }
-    buildToolsVersion '30.0.2'
 }
 
 dependencies {

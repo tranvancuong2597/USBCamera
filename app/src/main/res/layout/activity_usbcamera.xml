@@ -5,14 +5,14 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#ff000000"
-    tools:context=".view.USBCameraActivity"
+    tools:context="com.cuongtv.usbcamera.view.USBCameraActivity"
     tools:ignore="MergeRootFrame">
 
     <androidx.appcompat.widget.Toolbar
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
-        android:background="@color/colorPrimary"
+        android:background="@color/colorBlack"
         android:theme="@style/ThemeOverlay.AppCompat.Dark.ActionBar"
         app:navigationIcon="@null"
         app:popupTheme="@style/ThemeOverlay.AppCompat.Light" />
@@ -29,12 +29,12 @@
             android:layout_gravity="center"/>
     </FrameLayout>
 
-    <com.jiangdg.usbcamera.view.OverlayView
+    <com.cuongtv.usbcamera.view.OverlayView
         android:id="@+id/tracking_overlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:layout_below="@id/toolbar">
-    </com.jiangdg.usbcamera.view.OverlayView>
+    </com.cuongtv.usbcamera.view.OverlayView>
 
     <LinearLayout
         android:id="@+id/llayout_contrast"
@@ -87,19 +87,5 @@
             android:layout_height="match_parent"
             android:layout_weight="2" />
     </LinearLayout>
-
-    <Switch
-        android:id="@+id/switch_rec_voice"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_alignLeft="@+id/llayout_brightness"
-        android:layout_alignStart="@+id/llayout_brightness"
-        android:layout_below="@+id/toolbar"
-        android:layout_marginLeft="13dp"
-        android:layout_marginStart="13dp"
-        android:layout_marginTop="27dp"
-        android:checked="false"
-        android:text="closeVoice"
-        android:textColor="@color/colorWhite" />
 
 </RelativeLayout>

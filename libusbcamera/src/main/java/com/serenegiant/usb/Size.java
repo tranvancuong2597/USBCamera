@@ -25,6 +25,7 @@ package com.serenegiant.usb;
 
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.util.Log;
 
 import java.util.Locale;
 
@@ -193,6 +194,7 @@ public class Size implements Parcelable {
 		if ((frameIntervalIndex >= 0) && (frameIntervalIndex < n)) {
 			return fps[frameIntervalIndex];
 		}
+		Log.d("Cuongcuong", "fps: " + fps);
 		throw new IllegalStateException("unknown frame rate or not ready");
 	}
 

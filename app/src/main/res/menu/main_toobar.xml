@@ -3,22 +3,22 @@
     xmlns:app="http://schemas.android.com/apk/res-auto">
     <item
         android:id="@+id/menu_takepic"
-        android:title="takingPhotos"
+        android:title="Taking photo"
         app:showAsAction="never" />
     <item
         android:id="@+id/menu_recording"
-        android:title="recording"
+        android:title="Recording"
         app:showAsAction="never" />
-    <item
-        android:id="@+id/menu_focus"
-        android:title="cameraFocus"
-        app:showAsAction="never" />
+<!--    <item-->
+<!--        android:id="@+id/menu_focus"-->
+<!--        android:title="cameraFocus"-->
+<!--        app:showAsAction="never" />-->
     <item
         android:id="@+id/menu_resolution"
-        android:title="resolution"
+        android:title="Resolution"
         app:showAsAction="never" />
     <item
         android:id="@+id/menu_detect_image"
-        android:title="open detect image"
+        android:title="Detect image"
         app:showAsAction="never" />
 </menu>
